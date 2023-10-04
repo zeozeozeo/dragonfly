@@ -22,6 +22,7 @@ pub struct Timers {
 pub struct WebContext {
     /// Page URL
     url: Url,
+    html_str: Option<String>,
     /// Page loading timers
     pub timers: Timers,
     /// Parsed page
@@ -31,18 +32,31 @@ pub struct WebContext {
     /// Retrieves files and manages the file cache
     pub puller: Puller,
     /// Handles font storage and lookup
-    pub font_store: FontStorage,
+    pub font_manager: FontManager,
 }
 
 impl WebContext {
-    pub async fn new(url: &str, font_store: FontStorage) -> DfResult<Self> {
+    pub fn new(url: &str, font_manager: FontManager) -> DfResult<Self> {
         Ok(Self {
             url: Url::parse(url)?,
+            html_str: None,
             timers: Timers::default(),
             document: None,
             layout: Layout::default(),
             puller: Puller::default(),
-            font_store,
+            font_manager,
+        })
+    }
+
+    pub fn new_from_html(html_str: &str, url: &str, font_manager: FontManager) -> DfResult<Self> {
+        Ok(Self {
+            url: Url::parse(url)?,
+            html_str: Some(html_str.to_string()),
+            timers: Timers::default(),
+            document: None,
+            layout: Layout::default(),
+            puller: Puller::default(),
+            font_manager,
         })
     }
 
@@ -50,7 +64,12 @@ impl WebContext {
         // pull page, measure time
         let start = Instant::now();
 
-        let data = self.puller.pull_str(self.url.clone()).await?;
+        // if custom html str is available, prefer it over pulling the URL
+        let data = if self.html_str.is_some() {
+            self.html_str.clone().unwrap()
+        } else {
+            self.puller.pull_str(self.url.clone()).await?
+        };
 
         self.timers.pull = start.elapsed();
         log::info!("pulled in {:?}", self.timers.pull);
@@ -77,7 +96,7 @@ impl WebContext {
 
         // compute page layout
         log::info!("computing layout for the first time");
-        self.recompute_layout().await;
+        self.recompute_layout();
 
         // measure page load time
         self.timers.total = start.elapsed();
@@ -86,12 +105,12 @@ impl WebContext {
         Ok(())
     }
 
-    pub async fn recompute_layout(&mut self) {
+    pub fn recompute_layout(&mut self) {
         log::info!("recomputing layout...");
         let start = Instant::now();
 
         let mut doc = self.document().clone();
-        self.layout = Layout::compute(&mut doc, &self.font_store);
+        self.layout = Layout::compute(&mut doc, &mut self.font_manager);
 
         self.timers.layout = start.elapsed();
         log::info!("computed layout in {:?}", self.timers.layout);

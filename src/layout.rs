@@ -1,40 +1,46 @@
-use crate::{DOMTree, Declaration, FontStorage, Node, Pos2};
-use ego_tree::{NodeId, NodeRef};
+use crate::{DOMNode, Declaration, FontManager, GlobalStyle};
+use ego_tree::NodeRef as EgoNodeRef;
+use indextree::{Arena, NodeId};
 use scraper::{node::Element, Html};
 
 #[derive(Debug, Clone)]
 pub struct Layout {
-    pub tree: DOMTree,
+    /// DOM node arena. Has a root node by default.
+    pub arena: Arena<DOMNode>,
+    root_id: NodeId,
+    pub style: GlobalStyle,
 }
 
 impl Default for Layout {
     fn default() -> Self {
+        let mut arena = Arena::new();
+        let root_id = arena.new_node(DOMNode::root());
         Self {
-            tree: DOMTree::new(Node::root()),
+            arena,
+            root_id,
+            style: GlobalStyle::default_css(),
         }
     }
 }
 
 impl Layout {
-    pub fn compute(document: &mut Html, fonts: &FontStorage) -> Self {
+    pub fn compute(document: &mut Html, fonts: &mut FontManager) -> Self {
         let mut layout = Self::default();
-
         let root = document.tree.root();
 
         // compute all nodes recursively
-        let root_id = layout.tree.root_mut().id();
-        layout.compute_node(root, 0, fonts, root_id);
+        layout.compute_node(root, 0, layout.root_id, fonts);
 
-        log::debug!("HTML tree:\n{}", layout);
+        log::debug!("computed layout tree:\n{:?}", layout.arena);
         layout
     }
 
     fn compute_node(
         &mut self,
-        html_node: NodeRef<'_, scraper::Node>,
+        html_node: EgoNodeRef<'_, scraper::Node>,
         depth: usize,
-        fonts: &FontStorage,
         parent: NodeId,
+        fonts: &mut FontManager,
     ) {
         if html_node.value().is_element() {
             log::info!(
@@ -44,7 +50,12 @@ impl Layout {
         }
 
         let parent = match html_node.value() {
-            scraper::Node::Element(el) => self.handle_element(el, fonts, parent),
+            scraper::Node::Element(el) => self.handle_element(el, parent, fonts),
+            scraper::Node::Text(text) => {
+                log::debug!("adding text to parent node {parent:?}",);
+                parent.append_value(DOMNode::text_node(text), &mut self.arena);
+                parent
+            }
             _ => {
                 log::warn!("unhandled html node {:?}", html_node.value());
                 parent
@@ -52,16 +63,16 @@ impl Layout {
         };
 
         for child in html_node.children() {
-            self.compute_node(child, depth + 1, fonts, parent);
+            self.compute_node(child, depth + 1, parent, fonts);
         }
     }
 
-    fn handle_element(&mut self, el: &Element, fonts: &FontStorage, parent: NodeId) -> NodeId {
+    fn handle_element(&mut self, el: &Element, parent: NodeId, fonts: &mut FontManager) -> NodeId {
         let el_name = el.name();
         log::debug!("layout element '{}'", el_name);
 
         // create new node
-        let mut node = Node::new(el_name);
+        let mut node = DOMNode::new(el_name);
 
         // process node attrs
         for attr in el.attrs() {
@@ -69,25 +80,32 @@ impl Layout {
             log::debug!("parsing attribute: {:?}", attr);
 
             match attr.0 {
-                "style" => node.style = Declaration::from_inline(attr.1),
-                "lang" => log::debug!("ignoring lang attribute, value = '{}'", attr.1),
+                "style" => node.style = Some(Declaration::from_inline(attr.1)),
                 _ => log::warn!("unhandled attribute '{}'", attr.0),
             }
         }
 
         // add node to document
-        node.pos = Pos2::new(9.0, 28.0);
-        let mut parent = self.tree.get_mut(parent).unwrap();
+        self.add_node(node, parent, fonts)
+    }
 
-        let mut node = match el_name {
+    fn add_node(&mut self, node: DOMNode, parent: NodeId, fonts: &mut FontManager) -> NodeId {
+        let node_id = match node.name.as_str() {
             "html" => {
                 log::debug!("update root node");
-                *self.tree.root_mut().value() = node.clone();
-                self.tree.root_mut()
+                *self.arena.get_mut(self.root_id).unwrap().get_mut() = node.clone();
+                self.root_id
             }
-            _ => parent.append(node),
+            _ => parent.append_value(node, &mut self.arena),
         };
 
+        // get mutable node ref of parent
+        let node = self.arena.get_mut(node_id).unwrap().get_mut();
+
+        // compute node bounds
+        node.bounds(fonts);
+
+        /*
         log::debug!(
             "node attrs: {:?}; computing node bounds",
             node.value().attrs
@@ -96,25 +114,9 @@ impl Layout {
             "character metrics: {:?}",
             fonts.sans_serif().metrics('R', 16.0),
         );
+        */
 
-        node.id()
-    }
-
-    fn format_node(&self, s: &mut String, node: NodeId, depth: usize) {
-        for child in self.tree.get(node).unwrap().children() {
-            s.push_str(&("  ".repeat(depth) + &format!("{:?}\n", child.value())));
-            self.format_node(s, child.id(), depth + 1);
-        }
-    }
-}
-
-impl std::fmt::Display for Layout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = format!("{:?}\n", self.tree.root().value());
-        for child in self.tree.root().children() {
-            self.format_node(&mut s, child.id(), 0);
-        }
-        write!(f, "{}", s)?;
-        Ok(())
+        // return node id (will be used as a parent of children nodes)
+        node_id
     }
 }

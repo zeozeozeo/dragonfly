@@ -1,4 +1,4 @@
-use dragonfly::{Declaration, ParserMode};
+use dragonfly::{FontManager, WebContext};
 // use raqote::*; // graphics library
 
 /*
@@ -25,9 +25,11 @@ fn render_webcontext(ctx: &WebContext) {
 async fn main() {
     env_logger::init();
 
-    // let _ = Declaration::from_css(include_str!("../../../tests/test.css"), ParserMode::Normal);
-    let _ = Declaration::from_css(
-        include_str!("../../../src/internal/default.css"),
-        ParserMode::DefaultCss,
-    );
+    let mut ctx = WebContext::new_from_html(
+        include_str!("../../../tests/garbage.html"),
+        "http://localhost",
+        FontManager::with_fallback_font(),
+    )
+    .unwrap();
+    ctx.load().await.unwrap();
 }
